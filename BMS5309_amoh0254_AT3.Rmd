@@ -1,0 +1,1310 @@
+---
+title: "BMS5309_amoh0254_AT3"
+author: "amoh0254"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# BMS5309 Assessment Task 3
+
+## Part A - Bulk RNA Sequencing Pipeline Codes:
+
+### I. Bash Scripts
+
+#### 1. Quality Control using FastQC and MultiQC:
+
+```{bash, eval=FALSE}
+#!/bin/bash
+
+# Import modules
+module load fastqc
+module load multiqc
+
+module avail fastqc
+module avail multiqc
+
+input_dir=~/analysis/data  
+output_dir=~/analysis/fastqc_results  
+
+# Create output directory if it doesn't already exist (-p allows 
+# creation of nested  
+# directories)  
+
+mkdir -p "$output_dir"  
+for file in "${input_dir}"/*.fastq  
+do  
+        echo "$file"  
+        fastqc "$file" --outdir="$output_dir"  
+done  
+multiqc "$output_dir" -o "$output_dir"
+
+```
+
+#### 2. Adapter Trimming using Trimmomatic:
+
+```{bash, eval=FALSE}
+#!/bin/bash
+
+# Import module
+module load trimmomatic
+module avail trimmomatic
+
+input_dir=~/analysis/data
+output_dir=~/analysis/trimmomatic
+mkdir -p "$output_dir"
+for file1 in "${input_dir}"/*_R1.fastq
+do
+file2="${file1/_R1.fastq/_R2.fastq}"
+
+if [[ ! -f "$file2" ]]; then
+echo "Warning: Pair file not found for $file1" continue
+fi
+# Extract sample base name (e.g., SRR975551)
+name=$(basename "$file1" "_R1.fastq")
+# Define output file names
+out1="${output_dir}/${name}_1.trim_pe.fastq"
+out2="${output_dir}/${name}_2.trim_pe.fastq"
+out1se="${output_dir}/${name}_1.trim_se.fastq"
+out2se="${output_dir}/${name}_2.trim_se.fastq"
+
+echo "Running Trimmomatic for $name..."
+
+java -jar "$TRIMMOMATIC_PATH"/trimmomatic-0.38.jar PE -threads 4 "$file1" "$file2" "$out1" "$out1se" "$out2" "$out2se" LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:50
+done
+
+```
+
+#### 3. Post-trim Quality Control using FastQC and MultiQC:
+
+```{bash, eval=FALSE}
+#!/bin/bash
+
+# Import modules
+module load fastqc
+module load multiqc
+
+module avail fastqc
+module avail multiqc
+
+input_dir=~/analysis/trimmomatic 
+output_dir=~/analysis/post_trim_fastqc_results 
+
+# Create output directory if it doesn't already exist (-p allows 
+# creation of nested  
+# directories)  
+
+mkdir -p "$output_dir"  
+for file in "${input_dir}"/*.fastq  
+do  
+        echo "$file"  
+        fastqc "$file" --outdir="$output_dir"  
+done  
+multiqc "$output_dir" -o "$output_dir"
+
+```
+
+#### 4. Read Alignment to Reference Genome using Hisat2:
+
+```{bash, eval=FALSE}
+#!/bin/bash  
+
+# Import module
+module load hisat2
+module avail hisat2
+ 
+reference_genome=~/bm26/reference_genomes/mouse/hisat2_ref/mouse_grcm39_index 
+input_dir=~/analysis/trimmomatic
+output_dir=~/analysis/trimmomatic_hisat2 
+mkdir -p "$output_dir"  
+for file1 in "${input_dir}"/*_1.trim_pe.fastq  
+do   
+file2="${file1/_1.trim_pe.fastq/_2.trim_pe.fastq}"   
+if [[ ! -f "$file2" ]]; then   
+echo "Paired file not found for: $file1"  
+continue   
+fi   
+sample_name=$(basename "$file1"_1.trim_pe.fastq)  
+output_sam="${output_dir}/${sample_name}.hisat2.sam"   
+echo "Aligning sample: $sample_name"   
+hisat2 -x "$reference_genome" -1 "$file1" -2 "$file2" -S "$output_sam"  
+done 
+
+```
+
+#### 5. Mapping and Quantification of Transcripts using SAMtools and featureCounts:
+
+```{bash, eval=FALSE}
+#!/bin/bash  
+# SAMtools
+
+# Import module
+module load samtools
+module avail samtools
+
+input_dir=~/analysis/trimmomatic_hisat2 
+output_dir=~/analysis/aligned_sorted_bam  
+mkdir -p "$output_dir"  
+for file in "$input_dir"/*.sam  
+do   
+# Get the basename of the file minus the ".sam" ending   
+name=$(basename "$file" .sam)   
+echo "$name" 
+# Convert SAM to BAM format   
+samtools view -b "$file" > "$output_dir"/"$name".unsorted.bam   
+# Sort BAM files   
+samtools sort "$output_dir"/"$name".unsorted.bam > "$output_dir"/"$name".sorted.bam  
+# Index BAM files   
+samtools index "$output_dir"/"$name".sorted.bam   
+# Generate summary stats   
+samtools flagstat "$output_dir"/"$name".sorted.bam > "$output_dir"/"$name".flagstat   
+# Delete the unsorted BAM
+rm "$output_dir"/"$name".unsorted.bam 
+done 
+
+```
+
+```{bash, eval=FALSE}
+#!/bin/bash 
+# featureCounts
+
+# Import module
+module load subread
+module avail subread
+
+reference_gtf="/home/amoh0254/bm26/reference_genomes/mouse/Mus_musculus.GRCm39.110.gtf"
+bam_dir="/home/amoh0254/analysis/aligned_sorted_bam"  
+output_dir="/home/amoh0254/analysis/counts/combined_counts.txt"
+output_file="combined_counts.txt"  
+
+
+mkdir -p "$output_dir"  
+
+featureCounts -p -t exon -g gene_id -s 0 \
+  -a "$reference_gtf" \
+  -o "$output_dir/$output_file" \
+  "$bam_dir"/*stimulated_R1.fastq_1.trim_pe.fastq_1.trim_pe.fastq.hisat2.sorted.bam
+  
+```
+
+### II. R Scripts
+
+#### 6. Library Size Normalization, 8. Differential Expression (DE):
+
+-   Install/load required packages
+
+```{r}
+# Install required packages
+if (!requireNamespace("BiocManager", quietly = TRUE)) { 
+  install.packages("BiocManager") 
+} 
+if (!requireNamespace("edgeR", quietly = TRUE)) { 
+  BiocManager::install("edgeR") 
+} 
+if (!requireNamespace("org.Mm.eg.db", quietly = TRUE)) { 
+  BiocManager::install("org.Mm.eg.db") 
+} 
+if (!requireNamespace("GO.db", quietly = TRUE)) { 
+  BiocManager::install("GO.db") 
+} 
+if (!requireNamespace("AnnotationDbi", quietly = TRUE)) { 
+  BiocManager::install("AnnotationDbi") 
+} 
+if (!requireNamespace("tidyverse", quietly = TRUE)) { 
+  install.packages("tidyverse") 
+} 
+
+# Load packages 
+library(edgeR) 
+library(org.Mm.eg.db) 
+library(GO.db) 
+library(AnnotationDbi) 
+library(tidyverse) 
+
+```
+
+-   Read the count matrix
+
+```{r}
+counts <- read.table("~/bm26/week2_wshop1_data/sturner_time_course.tsv", header=T, 
+                     sep="\t", stringsAsFactors = FALSE)
+
+```
+
+-   Inspect the data
+
+```{r}
+head(counts)
+
+```
+
+-   Prepare the count matrix
+
+```{r}
+#The important point is that the first column (X) contains the mouse gene symbols, while the 
+#remaining 12 columns are your count data. Your first column is called X, so rename it to 
+#GeneName. 
+
+# Rename first column  
+colnames(counts)[1] <- "GeneName" 
+
+# Check the structure 
+head(counts) 
+
+dim(counts) 
+
+# Check for duplicated gene names 
+sum(duplicated(counts$GeneName)) 
+
+
+# Make GeneName unique while keeping all rows 8
+counts$GeneName <- make.unique(as.character(counts$GeneName), sep = "_")
+
+# Set unique GeneName as row names 
+rownames(counts) <- counts$GeneName
+
+# Remove GeneName column 
+counts$GeneName <- NULL
+
+# Check 
+head(counts) 
+
+# Get the row names
+head(rownames(counts)) 
+
+#Check for duplicates 
+anyDuplicated(rownames(counts))
+
+```
+
+-   Create sample information
+
+```{r}
+# Create DGEList 
+dge <- DGEList(counts = counts) 
+
+# Check the object 
+dge
+
+#need to assign each sample to its time point. 
+group <- factor(c( 
+  "3hr", "5hr", "24hr", "0hr", 
+  "0hr", "3hr", "5hr", "24hr", 
+  "3hr", "5hr", "24hr", "0hr" 
+)) 
+group 
+
+#check that the groups match the sample names: 
+data.frame(Sample = colnames(dge), Group = group ) 
+
+dge$samples$group <- group 
+dge$samples 
+
+```
+
+-   Filter lowly expressed genes
+
+```{r}
+#Filter low expressed genes 
+# Calculate CPM 
+cpm_values <- cpm(dge)
+
+# Keep genes with CPM > 0.7 in at least 2 samples 
+keep <- rowSums(cpm_values > 0.7) >= 2 
+
+# Check how many genes will be retained 
+table(keep)
+
+dge <- dge[keep, , keep.lib.sizes = FALSE] 
+
+# Check dimensions 
+dim(dge) 
+
+```
+
+-   Normalise the data
+
+```{r}
+#perform TMM normalisation. 
+dge <- calcNormFactors(dge) 
+
+# Check normalisation factors 
+dge$samples 
+
+```
+
+-   Define experimental design
+
+```{r}
+# create design matrix. There are four time points, treat them as categorical groups 
+design <- model.matrix(~0 + group) 
+colnames(design) <- levels(group) 
+design 
+
+```
+
+-   Estimate dispersion
+
+```{r}
+#Estimate dispersion 
+dge <- estimateDisp(dge, design) 
+
+# View common dispersion 
+dge$common.dispersion 
+
+#look at the dispersion plot - helps visualise biological variability across genes 
+plotBCV(dge)
+
+```
+
+-   Perform differential expression analysis
+
+```{r}
+#Fit the quasi-likelihood model 
+fit <- glmQLFit(dge, design) 
+fit 
+
+#create contrast 
+colnames(design) <- c("hr0", "hr3", "hr5", "hr24") 
+design 
+
+contrast_5hr_vs_3hr <- makeContrasts(hr5 - hr3,levels = colnames(design)) 
+contrast_5hr_vs_3hr 
+
+# logFC = expression at 5hr − expression at 3hr 
+# Therefore: positive logFC → higher at 5hr, negative logFC → lower at 5hr  
+# Perform the differential expression test 
+qlf_5hr_vs_3hr <- glmQLFTest(fit, contrast = contrast_5hr_vs_3hr) 
+qlf_5hr_vs_3hr
+
+# extract all genes 
+results_5hr_vs_3hr <- topTags(qlf_5hr_vs_3hr,n = Inf)$table 
+head(results_5hr_vs_3hr)
+
+```
+
+-   Extract significant DE genes
+
+```{r}
+# Identify significant DE genes: FDR < 0.05, absolute log2FC ≥ 1 
+sig_5hr_vs_3hr <- results_5hr_vs_3hr[results_5hr_vs_3hr$FDR < 0.05 & 
+                                       abs(results_5hr_vs_3hr$logFC) >= 1,] 
+head(sig_5hr_vs_3hr) 
+
+#count them 
+nrow(sig_5hr_vs_3hr) 
+
+#Separate up- and down-regulated genes 
+up_5hr_vs_3hr <- results_5hr_vs_3hr[results_5hr_vs_3hr$FDR < 0.05 & 
+                                      results_5hr_vs_3hr$logFC >= 1,] 
+down_5hr_vs_3hr <- results_5hr_vs_3hr[results_5hr_vs_3hr$FDR < 0.05 & 
+                                        results_5hr_vs_3hr$logFC <= -1,] 
+nrow(up_5hr_vs_3hr)  
+nrow(down_5hr_vs_3hr)
+
+#Sort the DE genes 
+# most strongly up-regulated genes 
+head(up_5hr_vs_3hr[order(-up_5hr_vs_3hr$logFC),])
+
+# most strongly down-regulated 
+head(down_5hr_vs_3hr[order(down_5hr_vs_3hr$logFC),])
+
+#Save the results 
+write.csv(results_5hr_vs_3hr,"DE_results_5hr_vs_3hr.csv",row.names = TRUE) 
+write.csv(sig_5hr_vs_3hr,"Significant_DEG_5hr_vs_3hr.csv",row.names = TRUE) 
+
+# Volcano plot 
+# Add a significance classification 
+results_5hr_vs_3hr$Significant[results_5hr_vs_3hr$FDR < 0.05 & 
+                                 results_5hr_vs_3hr$logFC >= 1] <- "Up" 
+results_5hr_vs_3hr$Significant[results_5hr_vs_3hr$FDR < 0.05 & 
+                                 results_5hr_vs_3hr$logFC <= -1] <- "Down" 
+
+#plot 
+ggplot(results_5hr_vs_3hr, 
+       aes( 
+         x = logFC, 
+         y = -log10(FDR), 
+         colour = Significant 
+       ) 
+) + 
+  geom_point(alpha = 0.6) + 
+  geom_vline( 
+    xintercept = c(-1, 1), 
+    linetype = "dashed" 
+  ) + 
+  geom_hline( 
+    yintercept = -log10(0.05), 
+    linetype = "dashed" 
+  ) + 
+  theme_classic() + 
+  labs( 
+    title = "Differential Expression: 5hr vs 3hr", 
+    x = "log2 Fold Change", 
+    y = "-log10(FDR)" 
+  ) 
+
+```
+
+-   Annotate genes
+
+```{r}
+# Go annotation with goanna: 
+# Check the first few gene names 
+head(rownames(dge)) 
+
+# Create the annotation table 
+test_annotation <- AnnotationDbi::select( 
+  org.Mm.eg.db, 
+  keys = rownames(sig_5hr_vs_3hr), 
+  keytype = "SYMBOL", 
+  columns = c("SYMBOL", "ENTREZID", "GENENAME") 
+) 
+head(test_annotation) 
+
+#Check how many genes mapped 
+sum(!is.na(test_annotation$ENTREZID))
+
+length(unique(rownames(sig_5hr_vs_3hr)))
+
+# This means 3470 of your 3768 significant genes have an Entrez ID mapping. 
+#Create the Entrez ID list for goana() 
+#This is important because your earlier error showed that your version of goana() expects a 
+#list of character vectors. 
+entrez_genes <- test_annotation$ENTREZID 
+entrez_genes <- entrez_genes[!is.na(entrez_genes)] 
+entrez_genes <- as.character(entrez_genes) 
+head(entrez_genes)
+
+length(entrez_genes) 
+
+#Run goana() 
+de_genes <- list(`5hr_vs_3hr` = entrez_genes) 
+go_results <- goana(de_genes,species = "Mm") 
+head(go_results) 
+
+#Add FDR correction 
+go_results$FDR <- p.adjust( go_results$P.5hr_vs_3hr, method = "BH" )
+
+#sort by FDR 
+go_results <- go_results %>% arrange(FDR) 
+head(go_results) 
+
+#Separate BP, MF and CC 
+bp <- go_results %>% filter(Ont == "BP") 
+mf <- go_results %>% filter(Ont == "MF") 
+cc <- go_results %>% filter(Ont == "CC") 
+
+#select significant terms 
+sig_bp <- bp %>% filter(FDR < 0.05) 
+sig_mf <- mf %>% filter(FDR < 0.05) 
+sig_cc <- cc %>% filter(FDR < 0.05)
+
+#number of significant GO terms 
+nrow(sig_bp)
+
+nrow(sig_mf) 
+
+nrow(sig_cc) 
+
+# top 10 Biological Processes 
+head(sig_bp, 10) 
+
+#save 
+write.csv( 
+  sig_bp, 
+  "Biological_Process_5hr_vs_3hr_updated.csv", 
+  row.names = TRUE 
+) 
+write.csv( 
+  sig_mf, 
+  "Molecular_Function_5hr_vs_3hr_upodated.csv", 
+  row.names = TRUE 
+) 
+write.csv( 
+  sig_cc, 
+  "Cellular_Component_5hr_vs_3hr_updated.csv", 
+  row.names = TRUE 
+)
+
+```
+
+#### 7. Principal Component Analysis (PCA) based on normalized counts:
+
+```{r}
+#PCA check sample groups
+install.packages("ggfortify")
+library("ggfortify")
+install.packages("ggrepel")
+library("ggrepel")
+
+logCPM <- cpm(dge,log=TRUE,prior.count=1)
+sample_groups <- sub("X","",rownames(t(logCPM)))
+sample_groups <- sub("_.*","",sample_groups)
+dataPCA <- data.frame(
+  sample = rownames(t(logCPM)),  
+  grouping = sample_groups 
+)
+pca <- prcomp(t(logCPM))
+autoplot(pca, data = dataPCA, colour = 'grouping', label = FALSE) +
+  geom_text_repel(aes(label = dataPCA$sample), size = 3, max.overlaps = 20)
+
+```
+
+#### 9. Gene Set Enrichment of DE genes:
+
+-   Gene Ontology (GO) Enrichment using GOanna
+
+```{r}
+#Gene Ontology (GO) Enrichment via goana 
+go_results <- goana(de_genes, species = "Mm") 
+go_results
+
+go_results$FDR <- p.adjust(go_results$P.5hr_vs_3hr, method = "BH") 
+go_results 
+
+go_results <- go_results %>% arrange(FDR) 
+go_results
+
+bp <- go_results %>% filter(Ont == "BP") 
+mf <- go_results %>% filter(Ont == "MF") 
+cc <- go_results %>% filter(Ont == "CC") 
+write.csv(bp %>% filter(FDR < 0.05), "Biological_Process_5hr_vs_3hr_camera.csv", 
+          row.names = TRUE) 
+write.csv(mf %>% filter(FDR < 0.05), "Molecular_Function_5hr_vs_3hr_camera.csv", 
+          row.names = TRUE) 
+write.csv(cc %>% filter(FDR < 0.05), "Cellular_Component_5hr_vs_3hr_camera.csv", 
+          row.names = TRUE)
+
+```
+
+-   KEGG Pathway Enrichment using kegga
+
+```{r}
+#KEGG Pathway Enrichment via kegga
+kegg_results <- kegga(de_genes, species = "Mm") 
+kegg_results
+
+kegg_results$FDR <- p.adjust(kegg_results$P.5hr_vs_3hr, method = "BH") 
+sig_kegg <- kegg_results %>% filter(FDR < 0.05) %>% arrange(FDR) 
+sig_kegg
+
+write.csv(sig_kegg, "KEGG_Pathways_5hr_vs_3hr_camera.csv", row.names = TRUE) 
+
+#Extract gene mapping from database 
+all_genes_in_db <- keys(org.Mm.eg.db, keytype = "SYMBOL") 
+go_mapping <- AnnotationDbi::select(org.Mm.eg.db, keys = all_genes_in_db, keytype = "SYMBOL", 
+                     columns = c("GO", "ONTOLOGY")) 
+go_mapping
+
+#Filter strictly down to Biological Processes (BP)  
+bp_mapping <- go_mapping %>% filter(ONTOLOGY == "BP" & !is.na(GO) & 
+                                      !is.na(SYMBOL)) 
+bp_mapping
+
+#Create our structured gene list mapped by Gene Symbols to match DGEList matrix directly 
+gene_sets_list <- split(bp_mapping$SYMBOL, bp_mapping$GO)
+
+#Index matching positions relative to our active matrix rows 
+indexed_sets <- ids2indices(gene_sets_list, identifiers = rownames(dge))
+
+#Explanation for the above step : This step specifies which rows of the expression/count matrix belong to each gene set. Essentially, it maps the genes in each biological gene set to their corresponding row positions in the RNA-seq expression matrix. camera() needs to know which rows of your expression/count matrix belong to each gene set. 
+# ids2indices() converts the gene names in each gene set into the row numbers corresponding to those genes in dge. 
+#ids2indices() maps the genes in each biological gene set to their corresponding row positions in the RNA-seq expression matrix. This ensures that camera() tests the correct genes against the differential expression model. 
+#Gene sets → ids2indices() → camera() → enriched pathways → FDR → biological interpretation
+
+#Drop tiny categories to keep calculations statistically valid. Filter Out Very Small Gene Sets 
+indexed_sets <- indexed_sets[sapply(indexed_sets, length) >= 5]
+
+#Explanation of the above step: 
+#• indexed_sets contains the gene sets after matching their genes to those present in the RNA-seq dataset.  
+#• sapply(indexed_sets, length) calculates the number of genes from the RNA-seq dataset present in each gene set.  
+#• >= 5 keeps only gene sets containing at least five genes from the dataset. #• Very small gene sets can produce unstable or unreliable enrichment statistics, so filtering them out improves the robustness and interpretability of the analysis. 
+
+```
+
+- CAMERA Enrichment
+
+```{r}
+#Run CAMERA across the target contrast design 
+camera_results <- camera(dge, index = indexed_sets, design = design, contrast = 
+                           contrast_5hr_vs_3hr) 
+camera_results
+
+sig_camera <- camera_results %>% filter(FDR < 0.05) 
+sig_camera 
+
+#Save result data matrix 
+write.csv(sig_camera, "CAMERA_Competitive_Enrichment_5hr_vs_3hr.csv", row.names = 
+            TRUE)
+
+#Visualise the top pathways
+#plots
+#prepare the CAMERA results
+# CAMERA DOT PLOT
+camera_plot <- sig_camera %>%
+  mutate(
+    GO_ID = rownames(sig_camera),
+    negLogFDR = -log10(FDR)) %>%
+  arrange(FDR) %>%
+  slice_head(n = 20)
+# Convert GO IDs to readable GO terms
+camera_plot$TERM <- Term(GOTERM[camera_plot$GO_ID])
+
+# If a GO term cannot be found, keep the GO ID
+camera_plot$TERM <- ifelse(
+    is.na(camera_plot$TERM),
+    camera_plot$GO_ID,
+    camera_plot$TERM )
+
+# Order pathways by significance
+camera_plot$TERM <
+  - factor(
+    camera_plot$TERM,
+    levels = rev(camera_plot$TERM) )
+# Plot
+ggplot(
+  camera_plot,
+  aes(
+    x = negLogFDR,
+    y = TERM,
+    size = NGenes,
+    shape = Direction
+  )) +
+  geom_point() +
+  labs(
+    title = "CAMERA Gene Set Enrichment",
+    subtitle = "5 hr vs 3 hr",
+    x = "-log10(FDR)",
+    y = "GO Biological Process",
+    size = "Number of genes",
+    shape = "Direction"
+  ) +
+  
+theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(size = 8)
+  )
+```
+
+## Part B - Single-cell RNA Sequencing Pipeline Codes:
+
+### I. Bash Scripts
+
+#### 1. Cell Ranger:
+
+-   Memory T-cells
+
+```{bash, eval=FALSE}
+#!/usr/bin/env bash
+#SBATCH -p comp
+#SBATCH --job-name="Cell_Ranger_memory"
+#SBATCH --error=cellranger_err_memory.txt
+#SBATCH --account=bm26
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mem-per-cpu=64G
+#SBATCH --time=0-02:00:00
+
+module load cellranger/8.0.1
+reference_path="/home/amoh0254/bm26_scratch/reference/refdata-gex-GRCm39-2024-A/"
+#cd /home/amoh0254/bm26_scratch/amoh0254/scRNA/cellranger_results_WEEK6_02
+cd /home/amoh0254/bm26_scratch/amoh0254/scRNA/cellranger_output_memory
+
+fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/memory/"
+cellranger count --id="memory_M2" \
+           --transcriptome="$reference_path" \
+           --fastqs="$fastq_path" \
+           --sample="memory_M2" \
+           --create-bam=true 
+
+#fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/effector/"
+#cellranger count --id="Effector_E2" \
+#           --transcriptome=$reference_path \
+#           --fastqs=$fastq_path \
+#           --sample="Effector_E2" \
+#          --create-bam=true 
+
+#fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/naive/"
+#cellranger count --id="Naive_N2" \
+#           --transcriptome=$reference_path \
+#           --fastqs=$fastq_path \
+#           --sample="Naive_N2" \
+#           --create-bam=true 
+
+
+echo "====== Job Resource Usage ======"
+sacct -j $SLURM_JOB_ID --format=JobID,Elapsed,MaxRSS,MaxDiskRead,MaxDiskWrite
+```
+
+-   Effector T-cells
+
+```{bash, eval=FALSE}
+#!/usr/bin/env bash
+#SBATCH -p comp
+#SBATCH --job-name="Cell_Ranger_effector"
+#SBATCH --error=cellranger_err_effector.txt
+#SBATCH --account=bm26
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mem-per-cpu=64G
+#SBATCH --time=0-02:00:00
+
+module load cellranger/8.0.1
+reference_path="/home/amoh0254/bm26_scratch/reference/refdata-gex-GRCm39-2024-A/"
+#cd /home/amoh0254/bm26_scratch/amoh0254/scRNA/cellranger_results_WEEK6_02
+cd /home/amoh0254/bm26_scratch/amoh0254/scRNA/cellranger_output
+
+
+#fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/memory/"
+#cellranger count --id="memory_M2" \
+#           --transcriptome="$reference_path" \
+#           --fastqs="$fastq_path" \
+#           --sample="memory_M2" \
+#           --create-bam=true 
+
+fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/effector/"
+cellranger count --id="Effector_E2" \
+           --transcriptome="$reference_path" \
+           --fastqs="$fastq_path" \
+           --sample="Effector_E2" \
+           --create-bam=true 
+
+#fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/naive/"
+#cellranger count --id="Naive_N2" \
+#           --transcriptome=$reference_path \
+#           --fastqs=$fastq_path \
+#           --sample="Naive_N2" \
+#           --create-bam=true 
+
+
+echo "====== Job Resource Usage ======"
+sacct -j $SLURM_JOB_ID --format=JobID,Elapsed,MaxRSS,MaxDiskRead,MaxDiskWrite
+```
+
+-   Naive T-cells
+
+```{bash, eval=FALSE}
+#!/usr/bin/env bash
+#SBATCH -p comp
+#SBATCH --job-name="Cell_Ranger_naive"
+#SBATCH --error=cellranger_err_naive.txt
+#SBATCH --account=bm26
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mem-per-cpu=64G
+#SBATCH --time=0-02:00:00
+
+module load cellranger/8.0.1
+reference_path="/home/amoh0254/bm26_scratch/reference/refdata-gex-GRCm39-2024-A/"
+#cd /home/amoh0254/bm26_scratch/amoh0254/scRNA/cellranger_results_WEEK6_02
+cd /home/amoh0254/bm26_scratch/amoh0254/scRNA/cellranger_output
+
+
+#fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/memory/"
+#cellranger count --id="memory_M2" \
+#           --transcriptome="$reference_path" \
+#           --fastqs="$fastq_path" \
+#           --sample="memory_M2" \
+#           --create-bam=true 
+
+#fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/effector/"
+#cellranger count --id="Effector_E2" \
+#           --transcriptome=$reference_path \
+#           --fastqs=$fastq_path \
+#           --sample="Effector_E2" \
+#          --create-bam=true 
+
+fastq_path="/home/amoh0254/bm26_scratch/amoh0254/scRNA/WEEK6_scRNA_data_1M/naive/"
+cellranger count --id="Naive_N2" \
+           --transcriptome="$reference_path" \
+           --fastqs="$fastq_path" \
+           --sample="Naive_N2" \
+           --create-bam=true 
+
+
+echo "====== Job Resource Usage ======"
+sacct -j $SLURM_JOB_ID --format=JobID,Elapsed,MaxRSS,MaxDiskRead,MaxDiskWrite
+```
+
+### II. R Scripts
+
+#### 1. scRNA-seq Analysis Preliminary Steps using Seurat:
+
+- Load the packages
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+library(patchwork)
+library(harmony)
+```
+
+- Define paths
+
+```{r}
+# Change this to the directory containing your Cell Ranger results
+
+base_dir <- "/home/amoh0254/bm26_scratch/amoh0254/scRNA/cellranger_output"
+
+# Cell Ranger filtered matrix directories
+
+effector_dir <- file.path(
+  base_dir,
+  "Effector_E2",
+  "outs",
+  "filtered_feature_bc_matrix"
+)
+
+memory_dir <- file.path(
+  base_dir,
+  "memory_M2",
+  "outs",
+  "filtered_feature_bc_matrix"
+)
+
+naive_dir <- file.path(
+  base_dir,
+  "Naive_N2",
+  "outs",
+  "filtered_feature_bc_matrix"
+)
+
+```
+
+- Load Cell Ranger data
+
+```{r}
+# Effector
+
+effector.data <- Read10X(data.dir = effector_dir)
+
+# Memory
+
+memory.data <- Read10X(data.dir = memory_dir)
+
+# Naive
+
+naive.data <- Read10X(data.dir = naive_dir)
+
+```
+
+- Create Seurat objects
+
+```{r}
+effector <- CreateSeuratObject(
+  counts = effector.data,
+  project = "Effector",
+  min.cells = 3,
+  min.features = 200
+)
+
+memory <- CreateSeuratObject(
+  counts = memory.data,
+  project = "Memory",
+  min.cells = 3,
+  min.features = 200
+)
+
+naive <- CreateSeuratObject(
+  counts = naive.data,
+  project = "Naive",
+  min.cells = 3,
+  min.features = 200
+)
+
+```
+
+- Add sample information
+
+```{r}
+effector$sample <- "Effector"
+memory$sample <- "Memory"
+naive$sample <- "Naive"
+```
+
+- Calculate mitochondrial percentage
+
+```{r}
+# Mouse mitochondrial genes normally begin with "mt-"
+
+effector[["percent.mt"]] <- PercentageFeatureSet(
+  effector,
+  pattern = "^mt-"
+)
+
+memory[["percent.mt"]] <- PercentageFeatureSet(
+  memory,
+  pattern = "^mt-"
+)
+
+naive[["percent.mt"]] <- PercentageFeatureSet(
+  naive,
+  pattern = "^mt-"
+)
+
+```
+
+- Examine QC metrics
+
+```{r}
+VlnPlot(
+  effector,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+  ncol = 3
+)
+
+VlnPlot(
+  memory,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+  ncol = 3
+)
+
+VlnPlot(
+  naive,
+  features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+  ncol = 3
+)
+
+```
+
+- QC scatter plots
+
+```{r}
+FeatureScatter(
+  effector,
+  feature1 = "nCount_RNA",
+  feature2 = "nFeature_RNA"
+)
+
+FeatureScatter(
+  memory,
+  feature1 = "nCount_RNA",
+  feature2 = "nFeature_RNA"
+)
+
+FeatureScatter(
+  naive,
+  feature1 = "nCount_RNA",
+  feature2 = "nFeature_RNA"
+)
+
+```
+
+- Filter low-quality cells
+
+```{r}
+effector <- subset(
+  effector,
+  subset = nFeature_RNA > 200 & percent.mt < 5
+)
+
+memory <- subset(
+  memory,
+  subset = nFeature_RNA > 200 & percent.mt < 5
+)
+
+naive <- subset(
+  naive,
+  subset = nFeature_RNA > 200 & percent.mt < 5
+)
+
+```
+
+- Merge the three samples
+
+```{r}
+seurat_object <- merge(
+  effector,
+  y = list(memory, naive),
+  add.cell.ids = c("Effector", "Memory", "Naive"),
+  project = "Effector_Memory_Naive"
+)
+
+# Check number of cells from each sample
+
+table(seurat_object$sample)
+```
+
+- Normalize the combined dataset
+
+```{r}
+seurat_object <- NormalizeData(
+  seurat_object,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000
+)
+
+```
+
+- Find highly variable genes
+
+```{r}
+seurat_object <- FindVariableFeatures(
+  seurat_object,
+  selection.method = "vst",
+  nfeatures = 2000
+)
+
+```
+
+- Plot highly variable genes
+
+```{r}
+top_vf <- head(
+  VariableFeatures(seurat_object),
+  10
+)
+
+top_vf
+
+plot1 <- VariableFeaturePlot(
+  seurat_object
+)
+
+plot2 <- LabelPoints(
+  plot = plot1,
+  points = top_vf,
+  repel = TRUE
+)
+
+plot2
+
+```
+
+- Scale the data
+
+```{r}
+all.genes <- rownames(seurat_object)
+
+seurat_object <- ScaleData(
+  seurat_object,
+  features = all.genes
+)
+
+```
+
+- PCA
+
+```{r}
+seurat_object <- RunPCA(
+  seurat_object,
+  features = VariableFeatures(
+    object = seurat_object
+  )
+)
+
+```
+
+- Examine PCA
+
+```{r}
+print(
+  seurat_object[["pca"]],
+  dims = 1:5,
+  nfeatures = 5
+)
+
+
+VizDimLoadings(
+  seurat_object,
+  dims = 1:2,
+  reduction = "pca"
+)
+
+DimPlot(
+  seurat_object,
+  reduction = "pca",
+  group.by = "sample"
+)
+
+```
+
+#### 2. scRNA-seq Analysis using Seurat:
+
+- UMAP
+
+```{r}
+seurat_object <- RunUMAP(
+  seurat_object,
+  dims = 1:10
+)
+
+```
+
+- UMAP coloured by sample
+
+```{r}
+DimPlot(
+  seurat_object,
+  reduction = "umap",
+  group.by = "sample"
+)
+
+```
+
+- Find clusters
+
+```{r}
+seurat_object <- FindNeighbors(
+  seurat_object,
+  dims = 1:10
+)
+
+seurat_object <- FindClusters(
+  seurat_object,
+  resolution = 0.5
+)
+
+```
+
+- UMAP coloured by cluster
+
+```{r}
+DimPlot(
+  seurat_object,
+  reduction = "umap",
+  group.by = "seurat_clusters",
+  label = TRUE
+)
+
+```
+
+- UMAP showing both sample and cluster
+
+```{r}
+DimPlot(
+  seurat_object,
+  reduction = "umap",
+  group.by = "sample"
+)
+
+DimPlot(
+  seurat_object,
+  reduction = "umap",
+  group.by = "seurat_clusters",
+  label = TRUE
+)
+
+```
+
+- Save Seurat object
+
+```{r}
+saveRDS(
+  seurat_object,
+  file = "Effector_Memory_Naive_Seurat.rds"
+)
+
+```
+
+#### 3. scRNA-seq Analysis using Harmony:
+
+- Harmony integration
+
+```{r}
+seurat_object <- harmony:::RunHarmony.Seurat(
+  object = seurat_object,
+  group.by.vars = "sample",
+  reduction.use = "pca",
+  dims.use = 1:20
+)
+
+```
+
+- Examine Harmony embedding
+
+```{r}
+
+DimPlot(
+  seurat_object,
+  reduction = "harmony",
+  group.by = "sample"
+)
+
+```
+
+- Find neighbours using Harmony
+
+```{r}
+seurat_object <- FindNeighbors(
+  seurat_object,
+  reduction = "harmony",
+  dims = 1:20
+)
+
+```
+
+- Find clusters
+
+```{r}
+seurat_object <- FindClusters(
+  seurat_object,
+  resolution = 0.5
+)
+
+```
+
+- Run UMAP using Harmony
+
+```{r}
+seurat_object <- RunUMAP(
+  seurat_object,
+  reduction = "harmony",
+  dims = 1:20
+)
+
+```
+
+- UMAP coloured by sample
+
+```{r}
+DimPlot(
+  seurat_object,
+  reduction = "umap",
+  group.by = "sample"
+)
+
+```
+
+- UMAP coloured by cluster
+
+```{r}
+DimPlot(
+  seurat_object,
+  reduction = "umap",
+  group.by = "seurat_clusters",
+  label = TRUE
+)
+
+```
+
+- UMAP split by sample
+
+```{r}
+DimPlot(
+  seurat_object,
+  reduction = "umap",
+  group.by = "sample",
+  split.by = "sample"
+)
+
+```
+
+- Save integrated Seurat object
+
+```{r}
+saveRDS(
+  seurat_object,
+  file = "Effector_Memory_Naive_Harmony_Seurat.rds"
+)
+
+```
